@@ -200,6 +200,7 @@ def extract_customer_name(data):
 def extract_registration_id(data):
     """Extrai registration_id de múltiplas fontes possíveis"""
     return (
+        data.get("refId") or  # Adicionado para compatibilidade com Cakto
         data.get("registration_id") or
         data.get("custom_field_1") or
         data.get("external_id") or

@@ -1,4 +1,3 @@
-
 from flask import Blueprint, request, jsonify, current_app
 import json
 import hmac

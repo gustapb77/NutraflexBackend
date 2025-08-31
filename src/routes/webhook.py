@@ -1,10 +1,44 @@
-from flask import Blueprint, request, jsonify
+
+from flask import Blueprint, request, jsonify, current_app
 import json
 import hmac
 import hashlib
 import os
 from datetime import datetime
 import logging
+import firebase_admin
+from firebase_admin import credentials, firestore, auth
+
+# Variáveis globais para Firestore e Auth
+db = None
+auth = None
+
+def initialize_firebase():
+    global db, auth
+    if not firebase_admin._apps:
+        firebase_credentials_path = os.getenv('FIREBASE_CREDENTIALS_PATH')
+        if not firebase_credentials_path:
+            raise EnvironmentError("A variável de ambiente 'FIREBASE_CREDENTIALS_PATH' não está definida.")
+        
+        try:
+            cred = credentials.Certificate(firebase_credentials_path)
+            firebase_admin.initialize_app(cred)
+            logger.info("Firebase inicializado com sucesso a partir da variável de ambiente.")
+        except Exception as e:
+            raise Exception(f"Erro ao inicializar Firebase: {e}")
+    
+    db = firestore.client()
+    auth = firebase_admin.auth
+
+# Chamar a inicialização do Firebase uma vez
+try:
+    initialize_firebase()
+except Exception as e:
+    logger.error(f"Falha na inicialização global do Firebase: {e}")
+    # Dependendo da aplicação, pode-se querer sair ou lidar com isso de outra forma
+    # Por enquanto, apenas logamos o erro e continuamos, mas as funções que dependem do Firebase falharão.
+
+
 
 webhook_bp = Blueprint("webhook", __name__)
 
@@ -12,8 +46,9 @@ webhook_bp = Blueprint("webhook", __name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configurações do webhook
-WEBHOOK_SECRET = os.environ.get("CAKTO_WEBHOOK_SECRET", "nutraflex_webhook_secret_2025")
+def get_webhook_secret():
+    """Obtém a chave secreta do webhook das configurações"""
+    return current_app.config.get('CAKTO_WEBHOOK_SECRET', 'nutraflex_webhook_secret_2025')
 
 # URL permanente do webhook (substitua quando tiver seu próprio domínio)
 PERMANENT_WEBHOOK_URL = "https://web-production-1af5.up.railway.app/api/webhook/cakto"
@@ -45,8 +80,9 @@ def handle_cakto_webhook():
         logger.info(f"Payload size: {len(payload)} bytes")
         
         # Validar assinatura do webhook (opcional para desenvolvimento)
-        if WEBHOOK_SECRET != "nutraflex_webhook_secret_2025":  # Só validar se não for o secret padrão
-            if not validate_webhook_signature(payload, signature):
+        webhook_secret = get_webhook_secret()
+        if webhook_secret != "nutraflex_webhook_secret_2025":  # Só validar se não for o secret padrão
+            if not validate_webhook_signature(payload, signature, webhook_secret):
                 logger.warning("Assinatura do webhook inválida")
                 return jsonify({"error": "Assinatura inválida"}), 401
         
@@ -88,7 +124,7 @@ def handle_cakto_webhook():
         logger.error(f"Erro ao processar webhook: {str(e)}")
         return jsonify({"error": "Erro interno do servidor", "details": str(e)}), 500
 
-def validate_webhook_signature(payload, signature):
+def validate_webhook_signature(payload, signature, webhook_secret):
     """
     Valida a assinatura do webhook da Cakto
     """
@@ -98,7 +134,7 @@ def validate_webhook_signature(payload, signature):
     try:
         # Calcular assinatura esperada
         expected_signature = hmac.new(
-            WEBHOOK_SECRET.encode("utf-8"),
+            webhook_secret.encode("utf-8"),
             payload,
             hashlib.sha256
         ).hexdigest()
@@ -162,10 +198,10 @@ def handle_payment_approved(data):
                 "identification_method": firebase_result.get("identification_method", "unknown")
             }
         else:
-            logger.error(f"Erro ao criar conta: {firebase_result.get("error")}")
+            logger.error(f"Erro ao criar conta: {firebase_result.get('error')}")
             return {
                 "error": "Erro ao criar conta",
-                "details": firebase_result.get("error")
+                "details": firebase_result.get('error')
             }
         
     except Exception as e:
@@ -264,7 +300,7 @@ def create_account_with_identification_strategy(customer_email, registration_id,
                 result["identification_method"] = "registration_id"
                 return result
             else:
-                logger.warning(f"Não foi possível criar conta por registration_id: {result.get("error")}")
+                logger.warning(f"Não foi possível criar conta por registration_id: {result.get('error')}")
         
         # ESTRATÉGIA 2: Buscar por email (fallback)
         logger.info(f"Tentando identificação por email: {customer_email}")
@@ -275,7 +311,7 @@ def create_account_with_identification_strategy(customer_email, registration_id,
             result["identification_method"] = "email"
             return result
         else:
-            logger.warning(f"Não foi possível criar conta por email: {result.get("error")}")
+            logger.warning(f"Não foi possível criar conta por email: {result.get('error')}")
         
         # ESTRATÉGIA 3: Criar conta básica (último recurso)
         logger.info(f"Criando conta básica para: {customer_email}")
@@ -303,15 +339,12 @@ def create_account_from_pending_registration_by_id(registration_id, customer_ema
     try:
         logger.info(f"Buscando registro pendente por ID: {registration_id}")
         
-        import firebase_admin
-        from firebase_admin import credentials, firestore, auth
-        
-        # Inicializar Firebase se necessário
-        if not firebase_admin._apps:
-            cred = credentials.Certificate("/home/ubuntu/nutraflex/nutraflex-separado/nutraflex-backend/firebase_credentials.json")
-            firebase_admin.initialize_app(cred)
-        
-        db = firestore.client()
+        global db, auth
+        if db is None or auth is None:
+            # Isso não deveria acontecer se initialize_firebase() for chamado no início
+            # Mas é um fallback para garantir que db e auth estejam disponíveis
+            initialize_firebase()
+
         
         # Buscar registro pendente por ID específico
         pending_ref = db.collection("pending_registrations").document(registration_id)
@@ -327,7 +360,7 @@ def create_account_from_pending_registration_by_id(registration_id, customer_ema
         
         # Validar se o email confere (segurança adicional)
         if pending_data.get("email") != customer_email:
-            logger.warning(f"Email não confere: esperado {pending_data.get("email")}, recebido {customer_email}")
+            logger.warning(f"Email não confere: esperado {pending_data.get('email')}, recebido {customer_email}")
             return {
                 "success": False,
                 "error": "Email não confere com o registro pendente"
@@ -344,16 +377,26 @@ def create_account_from_pending_registration_by_id(registration_id, customer_ema
         
         # Criar usuário no Firebase Auth
         try:
-            user_record = auth.create_user(
+            
+            
+            user_uid = firebase_service.create_user(
                 email=pending_data["email"],
                 password=pending_data["password"],
-                display_name=pending_data["name"],
-                email_verified=True
+                display_name=pending_data["name"]
             )
-            user_uid = user_record.uid
-        except auth.EmailAlreadyExistsError:
-            user_record = auth.get_user_by_email(pending_data["email"])
-            user_uid = user_record.uid
+            
+            if not user_uid:
+                return {
+                    "success": False,
+                    "error": "Erro ao criar usuário no Firebase Auth"
+                }
+                
+        except Exception as e:
+            logger.error(f"Erro ao criar usuário no Firebase: {e}")
+            return {
+                "success": False,
+                "error": f"Erro ao criar usuário no Firebase: {str(e)}"
+            }
         
         # Criar perfil completo no Firestore
         user_profile = {
@@ -384,11 +427,6 @@ def create_account_from_pending_registration_by_id(registration_id, customer_ema
             "purchaseAmount": amount,
             "registrationId": registration_id,
             
-            # Metadados
-            "createdAt": firestore.SERVER_TIMESTAMP,
-            "updatedAt": firestore.SERVER_TIMESTAMP,
-            "registrationDate": firestore.SERVER_TIMESTAMP,
-            
             # Dados iniciais de progresso
             "totalSessions": 0,
             "currentLevel": 1,
@@ -397,32 +435,18 @@ def create_account_from_pending_registration_by_id(registration_id, customer_ema
             "longestStreak": 0
         }
         
-        # Salvar no Firestore
-        user_doc_ref = db.collection("users").document(user_uid)
-        user_doc_ref.set(user_profile)
+        # Salvar perfil no Firestore
+        if not firebase_service.save_user_profile(user_uid, user_profile):
+            return {
+                "success": False,
+                "error": "Erro ao salvar perfil no Firestore"
+            }
         
         # Criar documento de progresso inicial
-        progress_data = {
-            "userId": user_uid,
-            "level": 1,
-            "totalScore": 0,
-            "currentStreak": 0,
-            "longestStreak": 0,
-            "lastActivityDate": None,
-            "weeklyGoal": 3,
-            "monthlyGoal": 12,
-            "achievements": [],
-            "createdAt": firestore.SERVER_TIMESTAMP,
-            "updatedAt": firestore.SERVER_TIMESTAMP
-        }
-        
-        progress_ref = db.collection("users").document(user_uid).collection("progress").document("current")
-        progress_ref.set(progress_data)
+        firebase_service.create_progress_document(user_uid)
         
         # Remover registro pendente
-        if pending_ref:
-            pending_ref.delete()
-            logger.info(f"Registro pendente removido: {registration_id}")
+        firebase_service.delete_pending_registration(registration_id)
         
         logger.info(f"Conta criada com sucesso para {customer_email}")
         
@@ -446,20 +470,14 @@ def create_account_from_pending_registration_by_email(customer_email, customer_n
     try:
         logger.info(f"Buscando registro pendente por email: {customer_email}")
         
-
-        
-        import firebase_admin
-        from firebase_admin import credentials, firestore, auth
+        from src.services.firebase_service import firebase_service
         
         # Inicializar Firebase se necessário
-        if not firebase_admin._apps:
-            cred = credentials.Certificate("/home/ubuntu/nutraflex/nutraflex-separado/nutraflex-backend/firebase_credentials.json")
-            firebase_admin.initialize_app(cred)
-        
-        db = firestore.client()
+        if not firebase_service.is_initialized():
+            firebase_service.initialize()
         
         # Buscar registros pendentes por email
-        pending_query = db.collection("pending_registrations").where("email", "==", customer_email).limit(5)
+        pending_query = firebase_service.db.collection("pending_registrations").where("email", "==", customer_email).limit(5)
         pending_docs = list(pending_query.stream())
         
         if not pending_docs:
@@ -475,7 +493,7 @@ def create_account_from_pending_registration_by_email(customer_email, customer_n
             if data.get("expiresAt").todate() > datetime.now():
                 if not valid_pending or data.get("createdAt") > valid_pending.get("createdAt"):
                     valid_pending = data
-                    valid_pending["doc_ref"] = doc.reference
+                    valid_pending["doc_id"] = doc.id
         
         if not valid_pending:
             return {
@@ -484,17 +502,17 @@ def create_account_from_pending_registration_by_email(customer_email, customer_n
             }
         
         # Criar usuário no Firebase Auth
-        try:
-            user_record = auth.create_user(
-                email=valid_pending["email"],
-                password=valid_pending["password"],
-                display_name=valid_pending["name"],
-                email_verified=True
-            )
-            user_uid = user_record.uid
-        except auth.EmailAlreadyExistsError:
-            user_record = auth.get_user_by_email(valid_pending["email"])
-            user_uid = user_record.uid
+        user_uid = firebase_service.create_user(
+            email=valid_pending["email"],
+            password=valid_pending["password"],
+            display_name=valid_pending["name"]
+        )
+        
+        if not user_uid:
+            return {
+                "success": False,
+                "error": "Erro ao criar usuário no Firebase Auth"
+            }
         
         # Criar perfil completo no Firestore
         user_profile = {
@@ -520,15 +538,9 @@ def create_account_from_pending_registration_by_email(customer_email, customer_n
             "hasFullAccess": True,
             "isActive": True,
             "onboardingCompleted": True,
-            "purchaseCompletedAt": firestore.SERVER_TIMESTAMP,
             "transactionId": transaction_id,
             "purchaseAmount": amount,
             "registrationId": valid_pending.get("registrationId"),
-            
-            # Metadados
-            "createdAt": firestore.SERVER_TIMESTAMP,
-            "updatedAt": firestore.SERVER_TIMESTAMP,
-            "registrationDate": firestore.SERVER_TIMESTAMP,
             
             # Dados iniciais de progresso
             "totalSessions": 0,
@@ -538,32 +550,18 @@ def create_account_from_pending_registration_by_email(customer_email, customer_n
             "longestStreak": 0
         }
         
-        # Salvar no Firestore
-        user_doc_ref = db.collection("users").document(user_uid)
-        user_doc_ref.set(user_profile)
+        # Salvar perfil no Firestore
+        if not firebase_service.save_user_profile(user_uid, user_profile):
+            return {
+                "success": False,
+                "error": "Erro ao salvar perfil no Firestore"
+            }
         
         # Criar documento de progresso inicial
-        progress_data = {
-            "userId": user_uid,
-            "level": 1,
-            "totalScore": 0,
-            "currentStreak": 0,
-            "longestStreak": 0,
-            "lastActivityDate": None,
-            "weeklyGoal": 3,
-            "monthlyGoal": 12,
-            "achievements": [],
-            "createdAt": firestore.SERVER_TIMESTAMP,
-            "updatedAt": firestore.SERVER_TIMESTAMP
-        }
-        
-        progress_ref = db.collection("users").document(user_uid).collection("progress").document("current")
-        progress_ref.set(progress_data)
+        firebase_service.create_progress_document(user_uid)
         
         # Remover registro pendente
-        if valid_pending.get("doc_ref"):
-            valid_pending["doc_ref"].delete()
-            logger.info(f"Registro pendente removido: {valid_pending.get("registrationId")}")
+        firebase_service.delete_pending_registration(valid_pending["doc_id"])
         
         logger.info(f"Conta criada com sucesso para {customer_email}")
         
@@ -587,15 +585,12 @@ def create_basic_account(customer_email, customer_name, transaction_id, amount):
     try:
         logger.info(f"Criando conta básica para: {customer_email}")
         
-        import firebase_admin
-        from firebase_admin import credentials, firestore, auth
-        
-        # Inicializar Firebase se necessário
-        if not firebase_admin._apps:
-            cred = credentials.Certificate("/home/ubuntu/nutraflex/nutraflex-separado/nutraflex-backend/firebase_credentials.json")
-            firebase_admin.initialize_app(cred)
-        
-        db = firestore.client()
+        global db, auth
+        if db is None or auth is None:
+            # Isso não deveria acontecer se initialize_firebase() for chamado no início
+            # Mas é um fallback para garantir que db e auth estejam disponíveis
+            initialize_firebase()
+
         
         # Verificar se o usuário já existe
         try:
@@ -743,15 +738,12 @@ def handle_payment_refunded(data):
         customer_email = extract_customer_email(data)
         logger.warning(f"Pagamento estornado para: {customer_email}")
         
-        import firebase_admin
-        from firebase_admin import credentials, firestore, auth
-        
-        # Inicializar Firebase se necessário
-        if not firebase_admin._apps:
-            cred = credentials.Certificate("/home/ubuntu/nutraflex/nutraflex-separado/nutraflex-backend/firebase_credentials.json")
-            firebase_admin.initialize_app(cred)
-        
-        db = firestore.client()
+        global db, auth
+        if db is None or auth is None:
+            # Isso não deveria acontecer se initialize_firebase() for chamado no início
+            # Mas é um fallback para garantir que db e auth estejam disponíveis
+            initialize_firebase()
+
         
         try:
             user_record = auth.get_user_by_email(customer_email)

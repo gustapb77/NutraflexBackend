@@ -8,6 +8,10 @@ import logging
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
 
+# Configurar logging ANTES de qualquer outra coisa
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # Variáveis globais para Firestore e Auth
 db = None
 auth = None
@@ -15,16 +19,19 @@ auth = None
 def initialize_firebase():
     global db, auth
     if not firebase_admin._apps:
-        firebase_credentials_path = os.getenv('FIREBASE_CREDENTIALS_PATH')
-        if not firebase_credentials_path:
+        firebase_credentials_json = os.getenv('FIREBASE_CREDENTIALS_PATH')
+        if not firebase_credentials_json:
             raise EnvironmentError("A variável de ambiente 'FIREBASE_CREDENTIALS_PATH' não está definida.")
         
         try:
-            cred = credentials.Certificate(firebase_credentials_path)
+            # Carregar as credenciais a partir do JSON na variável de ambiente
+            cred_dict = json.loads(firebase_credentials_json)
+            cred = credentials.Certificate(cred_dict)
             firebase_admin.initialize_app(cred)
             logger.info("Firebase inicializado com sucesso a partir da variável de ambiente.")
         except Exception as e:
-            raise Exception(f"Erro ao inicializar Firebase: {e}")
+            logger.error(f"Erro ao inicializar Firebase: {e}")
+            raise
     
     db = firestore.client()
     auth = firebase_admin.auth
@@ -33,9 +40,9 @@ def initialize_firebase():
 try:
     initialize_firebase()
 except Exception as e:
-    logger.error(f"Falha na inicialização global do Firebase: {e}")
-    # Dependendo da aplicação, pode-se querer sair ou lidar com isso de outra forma
-    # Por enquanto, apenas logamos o erro e continuamos, mas as funções que dependem do Firebase falharão.
+    logger.error(f"Falha crítica na inicialização do Firebase. A aplicação não pode continuar: {e}")
+    # Em um ambiente de produção, você pode querer que a aplicação pare se o Firebase não puder ser inicializado.
+    # Por exemplo, raise SystemExit(f"Falha na inicialização do Firebase: {e}")
 
 
 

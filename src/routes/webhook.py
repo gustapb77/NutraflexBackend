@@ -14,15 +14,15 @@ webhook_bp = Blueprint("webhook", __name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- INICIALIZAÇÃO SEGURA DO FIREBASE ---
+# --- INICIALIZAÇÃO SEGURA DO FIREBASE (GLOBAL) ---
 # Carrega as credenciais do Firebase a partir de uma variável de ambiente.
 # Isso é mais seguro e compatível com serviços como o Railway.
 try:
-    firebase_creds_json = os.environ.get("FIREBASE_CREDENTIALS")
-    if not firebase_creds_json:
+    FIREBASE_CREDENTIALS_JSON = os.environ.get("FIREBASE_CREDENTIALS")
+    if not FIREBASE_CREDENTIALS_JSON:
         raise ValueError("A variável de ambiente FIREBASE_CREDENTIALS não está definida.")
     
-    cred_dict = json.loads(firebase_creds_json)
+    cred_dict = json.loads(FIREBASE_CREDENTIALS_JSON)
     cred = credentials.Certificate(cred_dict)
     
     if not firebase_admin._apps:
@@ -89,14 +89,13 @@ def handle_cakto_webhook():
         logger.info(f"Dados do webhook: {json.dumps(webhook_data, indent=2)}")
         
         # Processar o webhook baseado no evento
-        # Prioriza o 'event' se existir, caso contrário, usa 'type' ou 'payment.approved' como fallback
+        # Prioriza o \'event\' se existir, caso contrário, usa \'type\' ou \'payment.approved\' como fallback
         event_type = webhook_data.get("event", webhook_data.get("type", "payment.approved"))
-        data = webhook_data.get("data", webhook_data) # 'data' pode estar aninhado ou ser o próprio webhook_data
+        data = webhook_data.get("data", webhook_data) # \'data\' pode estar aninhado ou ser o próprio webhook_data
         
         logger.info(f"Processando evento: {event_type}")
         
-        # Adaptação para o evento 'purchase_approved' da Cakto
-        if event_type == "purchase_approved":
+        if event_type in ["payment.approved", "payment_approved", "approved", "completed", "purchase_approved"]:
             result = handle_payment_approved(data)
         elif event_type in ["payment.refused", "payment_refused", "refused", "failed"]:
             result = handle_payment_refused(data)
@@ -538,10 +537,10 @@ def handle_payment_refunded(data):
             logger.error("Firebase não inicializado globalmente no handle_payment_refunded. Tentando inicializar localmente.")
             # Tenta inicializar localmente se não estiver globalmente
             try:
-                firebase_creds_json = os.environ.get("FIREBASE_CREDENTIALS")
-                if not firebase_creds_json:
+                FIREBASE_CREDENTIALS_JSON = os.environ.get("FIREBASE_CREDENTIALS")
+                if not FIREBASE_CREDENTIALS_JSON:
                     raise ValueError("FIREBASE_CREDENTIALS não definida para fallback.")
-                cred_dict = json.loads(firebase_creds_json)
+                cred_dict = json.loads(FIREBASE_CREDENTIALS_JSON)
                 cred = credentials.Certificate(cred_dict)
                 firebase_admin.initialize_app(cred)
                 logger.info("Firebase inicializado localmente no handle_payment_refunded.")
@@ -588,4 +587,3 @@ def handle_payment_refunded(data):
             "success": False,
             "error": f"Erro ao processar estorno: {str(e)}"
         }
-

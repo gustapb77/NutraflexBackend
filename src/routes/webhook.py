@@ -1,4 +1,3 @@
-
 from flask import Blueprint, request, jsonify
 import json
 import hmac
@@ -534,10 +533,21 @@ def handle_payment_refunded(data):
         logger.warning(f"Pagamento estornado para: {customer_email}")
         
         # Inicializar Firebase se necessário (já inicializado globalmente, mas mantido para segurança)
+        # Esta parte é redundante se a inicialização global funcionar, mas serve como fallback
         if not firebase_admin._apps:
-            # Esta parte não deve ser alcançada se a inicialização global funcionou
-            logger.error("Firebase não inicializado globalmente no handle_payment_refunded.")
-            return {"success": False, "error": "Firebase não inicializado."}
+            logger.error("Firebase não inicializado globalmente no handle_payment_refunded. Tentando inicializar localmente.")
+            # Tenta inicializar localmente se não estiver globalmente
+            try:
+                firebase_creds_json = os.environ.get("FIREBASE_CREDENTIALS")
+                if not firebase_creds_json:
+                    raise ValueError("FIREBASE_CREDENTIALS não definida para fallback.")
+                cred_dict = json.loads(firebase_creds_json)
+                cred = credentials.Certificate(cred_dict)
+                firebase_admin.initialize_app(cred)
+                logger.info("Firebase inicializado localmente no handle_payment_refunded.")
+            except Exception as init_e:
+                logger.error(f"Falha na inicialização local do Firebase em handle_payment_refunded: {init_e}")
+                return {"success": False, "error": "Firebase não inicializado."}
         
         db = firestore.client()
         
@@ -578,3 +588,4 @@ def handle_payment_refunded(data):
             "success": False,
             "error": f"Erro ao processar estorno: {str(e)}"
         }
+
